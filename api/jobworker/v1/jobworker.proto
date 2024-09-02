@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package jobworker.v1;
+
+service JobWorkerService {
+  rpc StartJob(StartJobRequest) returns (StartJobResponse) {}
+  rpc StopJob(StopJobRequest) returns (StopJobResponse) {}
+  rpc JobStatus(JobStatusRequest) returns (JobStatusResponse) {}
+  rpc StreamJobOutput(StreamJobOutputRequest) returns (stream StreamJobOutputResponse) {}
+}
+
+message StartJobRequest {}
+
+message StartJobResponse {}
+
+message StopJobRequest {}
+
+message StopJobResponse {}
+
+message JobStatusRequest {}
+
+message JobStatusResponse {}
+
+message StreamJobOutputRequest {}
+
+message StreamJobOutputResponse {}
