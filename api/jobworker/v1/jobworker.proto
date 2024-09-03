@@ -39,6 +39,7 @@ enum JobStatus {
 
 message JobStatusResponse {
   JobStatus status = 1;
+  int32 exit_code = 2;
 }
 
 message StreamJobOutputRequest {

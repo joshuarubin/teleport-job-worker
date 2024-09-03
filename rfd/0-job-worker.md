@@ -21,8 +21,7 @@ The gRPC API is defined in `jobworker.proto` and the worker library interface is
 
 #### Worker Library
 
-The worker library defines a simple interface with methods to start, stop, query status and get the output of a job.
-The implementation is responsible for starting jobs, keeping track of their output, status and exit codes.
+The worker library defines a simple interface with methods to start, stop, query status and get the output of a job. The implementation is responsible for starting jobs, keeping track of their output, status and exit codes.
 
 ##### cgroups
 
@@ -30,7 +29,42 @@ The library implementation will be configured at instantiation with limits that 
 
 ##### namespaces
 
-The library implementation will be configured such that it knows how to execute the server binary as a child process, with the proper clone and unshare flags to execute in a new pid, mount and network namespace, and call back into the library to execute the given command for the job. This library instance is obviously separate from the main server process. It has several jobs to do though. It has to remount the `/proc` filesystem, create and configure the cgroup, set the cgroup for the pid and exec the job. The library in the main server process will then be able to follow the exit code, `stdout` and `stderr`.
+The library implementation will be configured such that it knows how to execute the server binary as a child process, with the proper clone and unshare flags to execute in a new pid, mount and network namespace, and call back into the library to execute the given command for the job. This library instance is obviously separate from the main server process, but due to being reexecuted with the same flags, just a different command (`child` instead of `serve`, see CLI UX below), it will retain all the necessary configuration.
+
+##### Job Execution
+
+The server will initially reexecute itself as follows:
+
+```sh
+/proc/self/exe child [serve flags] -- command [args]...
+```
+
+When calling this, it will set the command's `SysProcAttr` with:
+
+```go
+syscall.SysProcAttr{
+    Cloneflags: syscall.CLONE_NEWPID | // New pid namespace
+        syscall.CLONE_NEWNS | // New mount namespace group
+        syscall.CLONE_NEWNET, // New network namespace
+    Unshareflags: syscall.CLONE_NEWNS, // Isolate process mounts from host
+}
+```
+
+In order to provide proper accounting of the job the server will internally track of the execution with:
+
+- buffers for `stdout` and `stderr`
+- process status (e.g. running, complete, error)
+- exit code
+
+Once reexecuted, the `child` command has several jobs to do. It has to remount the `/proc` filesystem, create and configure the cgroup, set the cgroup for the pid and exec the job.
+
+##### Job Status
+
+Job status is extremely simple and only returns a status code and the exit_code. The status code is one of:
+
+- running: the job has not yet completed
+- completed: the job completed successfully
+- error: the job completed with a non-zero exit code
 
 ##### Job Output Storage
 
@@ -44,16 +78,20 @@ The worker library streams job output through an `io.ReadCloser`. The server wil
 
 JobID is an opaque identifier that is internally mapped to the pid of the process in the host namespace. Since pid is not guaranteed to be unique, nothing internal to the library will be keyed off of the pid. The pid is still required, though, in order to signal the process to stop, for example. The `go.jetify.com/typeid` library is used to generate job ids.
 
-UserID can be any unique value as far as the library is concerned. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. Practically, it is expected to be the serial number of the client certificate used to make the connection to the server. This way the client doesn't have to provide any other kind of identification. The serial number is guaranteed to be unique for all certificates signed by a given authority thus making this a valid method to identify unique users.
+UserID can be any unique value as far as the library is concerned. See the section on Authorization below for more information.
 
 #### gRPC API
 
-The gRPC API follows the worker library fairly closely. It does not require the user id in the messages because user id is derived from the client certificate used to make the connection. Additionally, the stream output is different since gRPC can't stream bytes, rather, it will stream one newline separated string at a time. Last, it has no need to be able to execute the job in a child process as that's only required by the library.
+The gRPC API follows the worker library fairly closely. It does not require the user id in the messages because user id is the client certificate's serial number, not explicitly provided. Additionally, the stream output format is slightly different since gRPC can't stream bytes, rather, it will stream one newline separated string at a time.
 
 ### Security Considerations
 
+#### TLS
+
+The following TLS configuration will be used, where `clientCAs` includes the ca cert that should sign all client certs and `crt` contains the server's cert and private key. Note that cipher suites are not used because they are [not configurable](https://go.dev/blog/tls-cipher-suites) in Go when using TLS 1.3. This configuration requires and validates client certificates for all connections.
+
 ```go
-cfg := &tls.Config{
+tls.Config{
     ClientAuth:   tls.RequireAndVerifyClientCert,
     ClientCAs:    clientCAs,
     Certificates: []tls.Certificate{crt},
@@ -61,6 +99,131 @@ cfg := &tls.Config{
 }
 ```
 
+#### Authorization
+
+The serial number of the client certificate is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification. The serial number is guaranteed to be unique for all certificates signed by a given authority thus making this a valid method to uniquely identify users.
+
+#### Non-Considerations
+
+At its core, this is a very dangerous service. It provides a facility for remote execution and, since it needs to be privileged to set up the namespaces, to do so as root. There are a number of things that could be done to make this safer, but are not requirements of the challenge, so they will not be implemented.
+
+Some examples of security improvements in a future version would be:
+
+- dropping privileges before executing a job
+- chroot into a separate, read-only filesystem
+- better handling of commands and arguments (e.g. proper escaping)
+
 ### CLI UX
 
-### Implementation Details
+A single binary, `job-worker` is used for all actions. It has several subcommands for each role. All configuration is done via cli flags.
+
+#### root level usage output
+
+```
+A prototype job worker service that provides an api to run arbitrary linux processes
+
+Usage:
+  job-worker [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  help        Help about any command
+  output      Stream the output of a job on the job-worker server
+  serve       Start the job-worker server and listen for connections
+  start       Start a job on the job-worker server
+  status      Get the status of a job on the job-worker server
+  stop        Stop a job on the job-worker server
+
+Flags:
+  -h, --help   help for job-worker
+
+Use "job-worker [command] --help" for more information about a command.
+```
+
+#### serve
+
+```
+Start the job-worker server and listen for connections
+
+Usage:
+  job-worker serve [flags]
+
+Flags:
+  -h, --help                        help for serve
+      --listen-addr string          listen address (default ":8000")
+      --max-cpu string              cpu.max value to set in cgroup for each job
+      --max-io string               io.max value to set in cgroup for each job
+      --max-memory string           memory.max value to set in cgroup for each job
+      --shutdown-timeout duration   time to wait for connections to close before forcing shutdown (default 30s)
+      --tls-ca-cert string          tls ca cert file to use for validating client certificates (required)
+      --tls-cert string             tls server certificate file (required)
+      --tls-key string              tls server key file (required)
+```
+
+#### child
+
+This is a "hidden" command that the server calls when it reexecutes itself in the new namespace before executing a job. It takes the same flags as `serve` but the additional arguments are the command and args for the job that is going to be executed.
+
+#### start
+
+```
+Start a job on the job-worker server
+
+Usage:
+  job-worker start [flags] -- command [args]...
+
+Flags:
+      --addr string          server address (default ":8000")
+  -h, --help                 help for start
+      --tls-ca-cert string   tls ca cert file to use for validating server certificate
+      --tls-cert string      tls client certificate file (required)
+      --tls-key string       tls client key file (required)
+```
+
+#### stop
+
+```
+Stop a job on the job-worker server
+
+Usage:
+  job-worker stop [flags] job-id
+
+Flags:
+      --addr string          server address (default ":8000")
+  -h, --help                 help for stop
+      --tls-ca-cert string   tls ca cert file to use for validating server certificate
+      --tls-cert string      tls client certificate file (required)
+      --tls-key string       tls client key file (required)
+```
+
+#### status
+
+```
+Get the status of a job on the job-worker server
+
+Usage:
+  job-worker status [flags] job-id
+
+Flags:
+      --addr string          server address (default ":8000")
+  -h, --help                 help for status
+      --tls-ca-cert string   tls ca cert file to use for validating server certificate
+      --tls-cert string      tls client certificate file (required)
+      --tls-key string       tls client key file (required)
+```
+
+#### output
+
+```
+Stream the output of a job on the job-worker server
+
+Usage:
+  job-worker output [flags] job-id
+
+Flags:
+      --addr string          server address (default ":8000")
+  -h, --help                 help for output
+      --tls-ca-cert string   tls ca cert file to use for validating server certificate
+      --tls-cert string      tls client certificate file (required)
+      --tls-key string       tls client key file (required)
+```

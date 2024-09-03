@@ -32,6 +32,6 @@ type Worker interface {
 	StartJob(ctx context.Context, userID UserID, command string, args ...string) (JobID, error)
 	StartJobChild(ctx context.Context, command string, args ...string) error
 	StopJob(ctx context.Context, userID UserID, jobID JobID) (ExitCode, error)
-	JobStatus(ctx context.Context, userID UserID, jobID JobID) (JobStatus, error)
+	JobStatus(ctx context.Context, userID UserID, jobID JobID) (JobStatus, ExitCode, error)
 	JobOutput(ctx context.Context, userID UserID, jobID JobID) (io.ReadCloser, error)
 }
