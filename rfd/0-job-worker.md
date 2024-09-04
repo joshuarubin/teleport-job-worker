@@ -115,6 +115,8 @@ tls.Config{
 }
 ```
 
+For the purposes of testing, and as general good security practice, keys should be generated with, and certificates should be signed with, modern algorithms according to current best practices. A recommendable choice, when this is being written, is to use to use an ECC private key generated with the NIST P-256 curve and to use SHA256 as the signature hash algorithm. The P-256 curve is implemented as a constant-time algorithm in the Go standard library. While this recommendation is not necessarily the state of the art with regards to security, it remains a good option factoring in client compatibility as it is very broadly deployed. To increase security at the cost of compatibility, consider using Curve25519 instead. Additionally, consider using certificates with short expirations, 3 months or less, and build in automated processes to renew and deploy them before expiration.
+
 #### Authorization
 
 The subject of the client certificate (using `(*x509.Certificate).Subject.String()`) is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification.
