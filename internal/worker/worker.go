@@ -16,16 +16,31 @@ type JobID struct {
 }
 
 type (
-	UserID    string
-	ExitCode  int
-	JobStatus int
+	UserID   string
+	ExitCode int
 )
+
+func NewJobID() (JobID, error) {
+	return typeid.New[JobID]()
+}
+
+func (id UserID) String() string {
+	return string(id)
+}
+
+func (c ExitCode) Int() int {
+	return int(c)
+}
+
+//go:generate stringer -type=JobStatus -trimprefix=JobStatus
+type JobStatus int
 
 const (
 	JobStatusUnspecified JobStatus = iota
 	JobStatusRunning
 	JobStatusComplete
 	JobStatusError
+	JobStatusStopped
 )
 
 type Worker interface {

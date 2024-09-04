@@ -33,7 +33,7 @@ The library implementation will be configured such that it knows how to execute 
 
 ##### Job Execution
 
-The server will initially reexecute itself as follows:
+The server will initially reexecute itself, using `exec.Command()`, as follows:
 
 ```sh
 /proc/self/exe child [serve flags] -- command [args]...
@@ -56,7 +56,7 @@ In order to provide proper accounting of the job the server will internally trac
 - process status (e.g. running, complete, error)
 - exit code
 
-Once reexecuted, the `child` command has several jobs to do. It has to remount the `/proc` filesystem, create and configure the cgroup, set the cgroup for the pid and exec the job.
+Once reexecuted, the `child` command has several jobs to do. It has to remount the `/proc` filesystem, create and configure the cgroup, set the cgroup for the pid and fully replace the execution, using `syscall.Exec()`, with the job binary.
 
 ##### Job Status
 
@@ -65,6 +65,7 @@ Job status is extremely simple and only returns a status code and the exit_code.
 - running: the job has not yet completed
 - completed: the job completed successfully
 - error: the job completed with a non-zero exit code
+- stopped: the job was manually stopped
 
 ##### Job Output Storage
 
@@ -74,6 +75,8 @@ Output for each job will be maintained, in memory, as long as the worker impleme
 
 The worker library streams job output through an `io.ReadCloser`. The server will indicate the end of the stream, if the job has completed, with the `io.EOF` error. The client may, at any time, close the stream to indicate that it is disconnecting. The client must always close the stream when it no longer needs it to prevent memory leaks.
 
+Internally, the library will maintain a buffer containing the job output. The job itself will be configured to use this buffer for `stdout` and `stderr` and the `Write()` method will be goroutine safe. When a client calls `JobOutput()` the library will create a new `io.Reader` that independently, and with goroutine safety, reads through to the end of the output buffer. If the job has already completed at this time, `io.EOF` will be returned. If not, subsequent calls to `Read()` will block until there is either more output to return or the job ends in which case `io.EOF` is returned.
+
 ##### Identifiers
 
 JobID is an opaque identifier that is internally mapped to the pid of the process in the host namespace. Since pid is not guaranteed to be unique, nothing internal to the library will be keyed off of the pid. The pid is still required, though, in order to signal the process to stop, for example. The `go.jetify.com/typeid` library is used to generate job ids.
@@ -82,9 +85,13 @@ UserID can be any unique value as far as the library is concerned. See the secti
 
 #### gRPC API
 
-The gRPC API follows the worker library fairly closely. It does not require the user id in the messages because user id is the client certificate's serial number, not explicitly provided. Additionally, the stream output format is slightly different since gRPC can't stream bytes, rather, it will stream one newline separated string at a time.
+The gRPC API follows the worker library fairly closely. It does not require the user id in the messages because user id is the client certificate's subject, not explicitly provided. Additionally, the stream output format is slightly different since gRPC can't stream bytes, rather, it will stream one newline separated byte array at a time.
 
 ### Security Considerations
+
+#### Authentication
+
+mTLS is used for authentication. The server will be configured with a ca certificate that it expects all client certificates to be signed by. All clients presenting a properly signed certificate are authenticated, every other connection is not.
 
 #### TLS
 
@@ -101,7 +108,7 @@ tls.Config{
 
 #### Authorization
 
-The serial number of the client certificate is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification. The serial number is guaranteed to be unique for all certificates signed by a given authority thus making this a valid method to uniquely identify users.
+The subject of the client certificate is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification.
 
 #### Non-Considerations
 
