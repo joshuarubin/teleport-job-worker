@@ -10,14 +10,13 @@ func _() {
 	var x [1]struct{}
 	_ = x[JobStatusUnspecified-0]
 	_ = x[JobStatusRunning-1]
-	_ = x[JobStatusStopping-2]
-	_ = x[JobStatusComplete-3]
-	_ = x[JobStatusStopped-4]
+	_ = x[JobStatusComplete-2]
+	_ = x[JobStatusStopped-3]
 }
 
-const _JobStatus_name = "UnspecifiedRunningStoppingCompleteStopped"
+const _JobStatus_name = "UnspecifiedRunningCompleteStopped"
 
-var _JobStatus_index = [...]uint8{0, 11, 18, 26, 34, 41}
+var _JobStatus_index = [...]uint8{0, 11, 18, 26, 33}
 
 func (i JobStatus) String() string {
 	if i < 0 || i >= JobStatus(len(_JobStatus_index)-1) {

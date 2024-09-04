@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package jobworker.v1;
 
-import "google/protobuf/duration.proto";
-
 service JobWorkerService {
   rpc StartJob(StartJobRequest) returns (StartJobResponse) {}
   rpc StopJob(StopJobRequest) returns (StopJobResponse) {}
@@ -22,7 +20,6 @@ message StartJobResponse {
 
 message StopJobRequest {
   string job_id = 1;
-  google.protobuf.Duration timeout = 2;
 }
 
 message StopJobResponse {}
@@ -35,9 +32,8 @@ message JobStatusRequest {
 enum JobStatus {
   JOB_STATUS_UNSPECIFIED = 0;
   JOB_STATUS_RUNNING = 1; // the job has been started
-  JOB_STATUS_STOPPING = 2; // the job was signaled to stop, but hasn't yet completed
-  JOB_STATUS_COMPLETE = 3; // the job completed successfully on its own
-  JOB_STATUS_STOPPED = 4; // the job completed after being manually signaled to stop
+  JOB_STATUS_COMPLETE = 2; // the job completed successfully on its own
+  JOB_STATUS_STOPPED = 3; // the job completed after being manually signaled to stop
 }
 
 message JobStatusResponse {

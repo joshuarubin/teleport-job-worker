@@ -25,11 +25,17 @@ The worker library defines a simple interface with methods to start, stop, query
 
 ##### cgroups
 
-The library implementation will be configured at instantiation with limits that can be parsed into values for `cpu.max`, `memory.max` and `io.max`. These values will originate from runtime flags provided to the server with useful defaults. All processes will be started in a new cgroup regardless of the values of these limits. Note that for expediency, it is assumed that cgroups v2 are in use on the system running the service.
+The library implementation will be configured at instantiation with limits that can be parsed into values for `cpu.max`, `memory.max` and `io.max`. These values will originate from runtime flags provided to the server with the following defaults:
+
+- `cpu.max`: `25000 100000`
+- `memory.max`: `128M`
+- `io.max`: `$MAJ:$MIN riops=100 wiops=10` (for each block device)
+
+All processes will be started in a new cgroup regardless of the values of these limits. Note that for expediency, it is assumed that cgroups v2 are in use on the system running the service.
 
 ##### namespaces
 
-The library implementation will be configured such that it knows how to execute the server binary as a child process, with the proper clone and unshare flags to execute in a new pid, mount and network namespace, and call back into the library to execute the given command for the job. This library instance is obviously separate from the main server process, but due to being reexecuted with the same flags, just a different command (`child` instead of `serve`, see CLI UX below), it will retain all the necessary configuration.
+The library implementation will be configured such that it knows how to execute the server binary as a child process, with the proper clone and unshare flags to execute in a new pid, mount and network namespace, and call back into the library (with the `StartJobChild()` method) to execute the given command for the job. This library instance is obviously separate from the main server process, but due to being reexecuted with the same flags, just a different command (`child` instead of `serve`, see CLI UX below), it will retain all the necessary configuration.
 
 ##### Job Execution
 
@@ -53,7 +59,7 @@ syscall.SysProcAttr{
 In order to provide proper accounting of the job the server will internally track of the execution with:
 
 - buffers for `stdout` and `stderr`
-- process status (e.g. running, complete, error)
+- process status (e.g. running, complete)
 - exit code
 
 Once reexecuted, the `child` command has several jobs to do. It has to remount the `/proc` filesystem, create and configure the cgroup, set the cgroup for the pid and fully replace the execution, using `syscall.Exec()`, with the job binary.
@@ -63,7 +69,6 @@ Once reexecuted, the `child` command has several jobs to do. It has to remount t
 Job status is extremely simple and only returns a status code and an optional exit_code. The status code is one of:
 
 - running: the job has been started and has not yet completed
-- stopping: the job has been signaled to stop, but hasn't yet completed
 - complete: the job completed successfully on its own
 - stopped: the job was manually stopped, this takes precedence over complete
 
@@ -89,7 +94,7 @@ UserID can be any unique value as far as the library is concerned. See the secti
 
 #### gRPC API
 
-The gRPC API follows the worker library fairly closely. The only significant difference is that it does not require the user id in the messages because user id is the client certificate's subject, not explicitly provided. Additionally, `StopJob()` in the library returns a channel that closes when the job completes. The gRPC API does not provide a facility for notifying the client when the job completes.
+The gRPC API follows the worker library fairly closely. The only significant difference is that it does not require the user id in the messages because user id is the client certificate's subject (using `(*x509.Certificate).Subject.String()`), not explicitly provided. Additionally, `StopJob()` in the library returns a channel that closes when the job completes. The gRPC API does not provide a facility for notifying the client when the job completes.
 
 ### Security Considerations
 
@@ -112,7 +117,7 @@ tls.Config{
 
 #### Authorization
 
-The subject of the client certificate is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification.
+The subject of the client certificate (using `(*x509.Certificate).Subject.String()`) is used as a unique user identifier and is implicitly required for all requests. It is used for authorization such that only the user that starts a job is permitted to stop it, get its status or output. This way the client doesn't have to explicitly provide any other kind of identification.
 
 #### Non-Considerations
 
@@ -121,7 +126,7 @@ At its core, this is a very dangerous service. It provides a facility for remote
 Some examples of security improvements in a future version would be:
 
 - dropping privileges before executing a job
-- chroot into a separate, read-only filesystem
+- pivot_root into a separate, read-only filesystem
 - better handling of commands and arguments (e.g. proper escaping)
 
 ### CLI UX
