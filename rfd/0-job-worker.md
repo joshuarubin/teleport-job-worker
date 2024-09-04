@@ -25,7 +25,7 @@ The worker library defines a simple interface with methods to start, stop, query
 
 ##### cgroups
 
-The library implementation will be configured at instantiation with limits that can be parsed into values for `cpu.max`, `memory.max` and `io.max`. These values will originate from runtime flags provided to the server with defaults that do not implement limits. All processes will be started in a new cgroup regardless of the values of these limits. Note that for expediency, it is assumed that cgroups v2 are in use on the system running the service.
+The library implementation will be configured at instantiation with limits that can be parsed into values for `cpu.max`, `memory.max` and `io.max`. These values will originate from runtime flags provided to the server with useful defaults. All processes will be started in a new cgroup regardless of the values of these limits. Note that for expediency, it is assumed that cgroups v2 are in use on the system running the service.
 
 ##### namespaces
 
@@ -60,12 +60,12 @@ Once reexecuted, the `child` command has several jobs to do. It has to remount t
 
 ##### Job Status
 
-Job status is extremely simple and only returns a status code and the exit_code. The status code is one of:
+Job status is extremely simple and only returns a status code and an optional exit_code. The status code is one of:
 
-- running: the job has not yet completed
-- completed: the job completed successfully
-- error: the job completed with a non-zero exit code
-- stopped: the job was manually stopped
+- running: the job has been started and has not yet completed
+- stopping: the job has been signaled to stop, but hasn't yet completed
+- complete: the job completed successfully on its own
+- stopped: the job was manually stopped, this takes precedence over complete
 
 ##### Job Output Storage
 
@@ -75,23 +75,27 @@ Output for each job will be maintained, in memory, as long as the worker impleme
 
 The worker library streams job output through an `io.ReadCloser`. The server will indicate the end of the stream, if the job has completed, with the `io.EOF` error. The client may, at any time, close the stream to indicate that it is disconnecting. The client must always close the stream when it no longer needs it to prevent memory leaks.
 
-Internally, the library will maintain a buffer containing the job output. The job itself will be configured to use this buffer for `stdout` and `stderr` and the `Write()` method will be goroutine safe. When a client calls `JobOutput()` the library will create a new `io.Reader` that independently, and with goroutine safety, reads through to the end of the output buffer. If the job has already completed at this time, `io.EOF` will be returned. If not, subsequent calls to `Read()` will block until there is either more output to return or the job ends in which case `io.EOF` is returned.
+Internally, the library will maintain a buffer containing the job output. The job itself will be configured to use this buffer for `stdout` and `stderr` and the `Write()` method will be goroutine safe. When a client calls `JobOutput()` the library will create a new `io.Reader` that independently, and with goroutine safety, reads through to the end of the output buffer. If the job has already completed at this time, `io.EOF` will be returned. If not, subsequent calls to `Read()` will block until there is either more output to return or the job ends in which case `io.EOF` is returned. When the job calls `Write()` it will signal connected readers that new data has been written to the output buffer. The readers will in turn be able to unblock and return their `Read()` calls to connected clients at that time.
+
+##### Stopping Jobs
+
+StopJob is an asynchronous request that takes an optional timeout. If the timeout is greater than 0, it will cause the library to first issue a `SIGINT` and wait up to `timeout` for the job to complete. If the job doesn't complete after `timeout`, or timeout was `0`, then the job is terminated with `SIGKILL`. The library returns a channel that will be closed when the job completes.
 
 ##### Identifiers
 
-JobID is an opaque identifier that is internally mapped to the pid of the process in the host namespace. Since pid is not guaranteed to be unique, nothing internal to the library will be keyed off of the pid. The pid is still required, though, in order to signal the process to stop, for example. The `go.jetify.com/typeid` library is used to generate job ids.
+JobID is an opaque identifier that is internally mapped to job in the library. Since pid is not guaranteed to be unique, nothing internal to the library will be keyed off of the pid. The library must still track the pid though in order to signal the process to stop, for example. The `go.jetify.com/typeid` library is used to generate job ids.
 
 UserID can be any unique value as far as the library is concerned. See the section on Authorization below for more information.
 
 #### gRPC API
 
-The gRPC API follows the worker library fairly closely. It does not require the user id in the messages because user id is the client certificate's subject, not explicitly provided. Additionally, the stream output format is slightly different since gRPC can't stream bytes, rather, it will stream one newline separated byte array at a time.
+The gRPC API follows the worker library fairly closely. The only significant difference is that it does not require the user id in the messages because user id is the client certificate's subject, not explicitly provided. Additionally, `StopJob()` in the library returns a channel that closes when the job completes. The gRPC API does not provide a facility for notifying the client when the job completes.
 
 ### Security Considerations
 
 #### Authentication
 
-mTLS is used for authentication. The server will be configured with a ca certificate that it expects all client certificates to be signed by. All clients presenting a properly signed certificate are authenticated, every other connection is not.
+mTLS is used for authentication. The server will be configured with a ca certificate that it expects all client certificates to be signed by. All connections presenting a certificate, signed by the configured ca certificate, are authenticated, all other connections are not.
 
 #### TLS
 
