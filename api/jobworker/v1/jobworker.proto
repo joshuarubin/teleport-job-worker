@@ -31,9 +31,10 @@ message JobStatusRequest {
 // NOTE: keep this synced with worker.JobStatus
 enum JobStatus {
   JOB_STATUS_UNSPECIFIED = 0;
-  JOB_STATUS_RUNNING = 1; // the job has been started
-  JOB_STATUS_COMPLETE = 2; // the job completed successfully on its own
-  JOB_STATUS_STOPPED = 3; // the job completed after being manually signaled to stop
+  JOB_STATUS_NOT_STARTED = 1; // the job has not yet been started
+  JOB_STATUS_RUNNING = 2; // the job has been started
+  JOB_STATUS_COMPLETE = 3; // the job completed successfully on its own
+  JOB_STATUS_STOPPED = 4; // the job completed after being manually signaled to stop
 }
 
 message JobStatusResponse {
