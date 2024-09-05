@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package jobworker.v1;
+
+service JobWorkerService {
+  rpc StartJob(StartJobRequest) returns (StartJobResponse) {}
+  rpc StopJob(StopJobRequest) returns (StopJobResponse) {}
+  rpc JobStatus(JobStatusRequest) returns (JobStatusResponse) {}
+  rpc StreamJobOutput(StreamJobOutputRequest) returns (stream StreamJobOutputResponse) {}
+}
+
+message StartJobRequest {
+  string command = 1;
+  repeated string args = 2;
+}
+
+message StartJobResponse {
+  string job_id = 1;
+}
+
+message StopJobRequest {
+  string job_id = 1;
+}
+
+message StopJobResponse {}
+
+message JobStatusRequest {
+  string job_id = 1;
+}
+
+// NOTE: keep this synced with worker.JobStatus
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_RUNNING = 1; // the job has been started
+  JOB_STATUS_COMPLETE = 2; // the job completed successfully on its own
+  JOB_STATUS_STOPPED = 3; // the job completed after being manually signaled to stop
+}
+
+message JobStatusResponse {
+  JobStatus status = 1;
+
+  // exit_code is optional since, in the case the job is still running or was
+  // killed, it may not have one
+  optional int32 exit_code = 2;
+}
+
+message StreamJobOutputRequest {
+  string job_id = 1;
+}
+
+message StreamJobOutputResponse {
+  bytes data = 1;
+}
