@@ -1,7 +1,6 @@
 package safebuffer
 
 import (
-	"context"
 	"io"
 	"testing"
 	"time"
@@ -24,13 +23,17 @@ func TestSafeBuffer(t *testing.T) {
 
 	t.Run("sync", func(t *testing.T) {
 		t.Parallel()
+
+		// this test is checking to make sure that the reader blocks until the
+		// job completes
+
 		assert := assert.New(t)
 		require := require.New(t)
-		ctx := context.Background()
 
 		jobDone := make(chan struct{})
-		buf := New(ctx, jobDone)
+		buf := New(jobDone)
 
+		// 1. Write to the buffer
 		var err error
 		for range 3 {
 			if e := <-bufWrite(buf, "foo"); e != nil {
@@ -42,6 +45,7 @@ func TestSafeBuffer(t *testing.T) {
 		require.NoError(err)
 		assert.Equal("foofoofoo", buf.buf.String())
 
+		// 2. Synchronous read everything from the buffer
 		r0 := buf.NewReader()
 		b := make([]byte, 3)
 		var n int
@@ -49,8 +53,10 @@ func TestSafeBuffer(t *testing.T) {
 			n, err = r0.Read(b)
 			require.NoError(err)
 			assert.Equal(3, n)
+			assert.Equal("foo", string(b[:n]))
 		}
 
+		// 3. Try reading more from the buffer in the goroutine
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -59,6 +65,7 @@ func TestSafeBuffer(t *testing.T) {
 			}
 		}()
 
+		// 4. This should time out because nothing more is written
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-timer.C:
@@ -66,8 +73,11 @@ func TestSafeBuffer(t *testing.T) {
 			t.Fatal("expected Read not to complete because jobDone wasn't closed")
 		}
 
+		// 5. Close the jobDone channel to simulate the job completing
 		close(jobDone)
 
+		// 6. Now the reader should return io.EOF and the done channel
+		// will close
 		timer.Reset(10 * time.Millisecond)
 		select {
 		case <-timer.C:
@@ -82,10 +92,9 @@ func TestSafeBuffer(t *testing.T) {
 		t.Parallel()
 		assert := assert.New(t)
 		require := require.New(t)
-		ctx := context.Background()
 
 		jobDone := make(chan struct{})
-		buf := New(ctx, jobDone)
+		buf := New(jobDone)
 
 		var err error
 		for range 3 {
@@ -114,10 +123,9 @@ func TestSafeBuffer(t *testing.T) {
 		t.Parallel()
 		assert := assert.New(t)
 		require := require.New(t)
-		ctx := context.Background()
 
 		jobDone := make(chan struct{})
-		buf := New(ctx, jobDone)
+		buf := New(jobDone)
 
 		var err error
 		for range 3 {
@@ -151,10 +159,9 @@ func TestSafeBuffer(t *testing.T) {
 		t.Parallel()
 		assert := assert.New(t)
 		require := require.New(t)
-		ctx := context.Background()
 
 		jobDone := make(chan struct{})
-		buf := New(ctx, jobDone)
+		buf := New(jobDone)
 
 		times := 1000
 		msg := "foo"

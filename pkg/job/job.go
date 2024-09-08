@@ -1,7 +1,6 @@
 package job
 
 import (
-	"context"
 	"errors"
 	"io"
 	"os"
@@ -9,35 +8,34 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/joshuarubin/teleport-job-worker/internal/config"
-	"github.com/joshuarubin/teleport-job-worker/internal/safebuffer"
-	"github.com/joshuarubin/teleport-job-worker/internal/user"
+	"github.com/joshuarubin/teleport-job-worker/pkg/safebuffer"
 )
 
 // Job represents a system process
 type Job struct {
-	cfg    *config.Config
 	id     ID
-	userID user.ID
+	userID UserID
 	cmd    *exec.Cmd
 	buf    *safebuffer.Buffer
 
 	startOnce sync.Once
+	startErr  error
 
 	stopOnce sync.Once
-	stopErr  atomic.Value
+	stopErr  error
 
 	status atomic.Uint32
 
-	done   chan struct{}
-	cmdErr error // only safe to read after done has closed
+	done chan struct{}
+
+	// these values are only safe to read after done has closed
+	cmdErr   error
+	exitCode *ExitCode
 }
 
 // New creates, but does not start a new job
 func New(
-	ctx context.Context,
-	cfg *config.Config,
-	userID user.ID,
+	userID UserID,
 	command string,
 	args []string,
 	env []string,
@@ -50,52 +48,69 @@ func New(
 	done := make(chan struct{})
 
 	j := Job{
-		cfg:    cfg,
 		id:     id,
 		userID: userID,
 		done:   done,
-		cmd:    exec.CommandContext(ctx, command, args...),
+		cmd:    exec.Command(command, args...),
 	}
 
-	j.buf = safebuffer.New(ctx, j.done)
+	j.buf = safebuffer.New(j.done)
 	j.cmd.Stdout = j.buf
 	j.cmd.Stderr = j.buf
 
 	j.cmd.SysProcAttr = sysProcAttr()
 
-	j.cmd.Env = os.Environ()
-	j.cmd.Env = append(j.cmd.Env, env...)
+	j.cmd.Env = append(os.Environ(), env...)
 	j.setStatus(StatusNotStarted)
 
 	return &j, nil
 }
 
+// ErrAlreadyStarted is returned when trying to start a job that has already
+// been started
 var ErrAlreadyStarted = errors.New("already started")
 
 // Start the job process. If Start() is called more than once ErrAlreadyStarted
 // will be returned.
 func (j *Job) Start() error {
-	var err error
 	var started bool
 	j.startOnce.Do(func() {
+		if j.startErr = j.cmd.Start(); j.startErr != nil {
+			return
+		}
 		j.setStatus(StatusRunning)
-		err = j.cmd.Start()
 		started = true
-
-		go func() {
-			defer func() {
-				j.setStatus(StatusComplete)
-				close(j.done)
-			}()
-			j.cmdErr = j.cmd.Wait()
-		}()
+		go j.wait()
 	})
-
+	if j.startErr != nil {
+		return j.startErr
+	}
 	if !started {
 		return ErrAlreadyStarted
 	}
+	return nil
+}
 
-	return err
+func (j *Job) wait() {
+	defer func() {
+		j.setStatus(StatusCompleted)
+		close(j.done)
+	}()
+
+	j.cmdErr = j.cmd.Wait()
+
+	var ec ExitCode
+
+	if j.cmdErr == nil {
+		j.exitCode = &ec
+		return
+	}
+
+	var eerr *exec.ExitError
+	if errors.As(j.cmdErr, &eerr) {
+		ec = ExitCode(eerr.ExitCode())
+		j.exitCode = &ec
+	}
 }
 
 // ID returns the job ID
@@ -104,7 +119,7 @@ func (j *Job) ID() ID {
 }
 
 // UserID returns the job ID
-func (j *Job) UserID() user.ID {
+func (j *Job) UserID() UserID {
 	return j.userID
 }
 
@@ -159,34 +174,16 @@ func (j *Job) Error() error {
 	return j.cmdErr
 }
 
-// ExitCode returns the process's exit code and whether or not it is valid. If
-// the process is still running, the exit code is not valid. If the process
-// completed successfully, the exit code is assumed to be 0. If the process
-// returned any exit code, it will be used. In the case the process was stopped
-// or signaled in some other way, it may have completed without a valid exit
-// code.
-func (j *Job) ExitCode() (ExitCode, bool) {
+// ExitCode returns the process's exit code. If the process is still running,
+// the exit code is nil. If the process completed successfully, the exit code
+// is assumed to be 0. If the process returned any exit code, it will be used.
+// In the case the process was stopped or signaled in some other way, it may
+// have completed without a valid exit code and may be nil.
+func (j *Job) ExitCode() *ExitCode {
 	if j.IsRunning() {
-		return 0, false
+		return nil
 	}
-
-	// if the job completed on its own and there is no error then its exit code
-	// is assumed to be 0
-	if j.Status() == StatusComplete && j.cmdErr == nil {
-		return 0, true
-	}
-
-	// if there was an error that has an exit code, obviously, use that as the
-	// exit code
-	var eerr *exec.ExitError
-	if errors.As(j.cmdErr, &eerr) {
-		return ExitCode(eerr.ExitCode()), true
-	}
-
-	// there may or may not be an error, but it doesn't have an exit code. this
-	// could be due to the fact that the job was killed with a signal. in any
-	// event, there's no usable exit code
-	return 0, false
+	return j.exitCode
 }
 
 // Stop the process. Returns any error from the signaling of the process, not
@@ -200,15 +197,14 @@ func (j *Job) Stop() error {
 			return
 		}
 
-		var err error
-
-		if err = j.cmd.Process.Kill(); errors.Is(err, os.ErrProcessDone) {
+		err := j.cmd.Process.Kill()
+		if errors.Is(err, os.ErrProcessDone) {
 			// there was a race, job wasn't done when Stop() was first called,
 			// but it was by the time the signal was sent
 			return
 		}
 		if err != nil {
-			j.stopErr.Store(err)
+			j.stopErr = err
 			return
 		}
 
@@ -216,8 +212,5 @@ func (j *Job) Stop() error {
 		j.setStatus(StatusStopped)
 	})
 
-	if err, ok := j.stopErr.Load().(error); ok {
-		return err
-	}
-	return nil
+	return j.stopErr
 }

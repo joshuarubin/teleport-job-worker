@@ -2,6 +2,7 @@ package safereader
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -18,8 +19,6 @@ type Reader struct {
 	dataAvail chan struct{}
 	closeOnce sync.Once
 }
-
-var _ io.ReadCloser = (*Reader)(nil)
 
 // jobIsRunning doesn't have a race because Buffer.NewReader calls it while
 // holding a lock that prevents new data, or the close of jobDone, from being
@@ -46,6 +45,30 @@ func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
 	closed := make(chan struct{})
 	closeFn := func() { close(closed) }
 
+	// 	This is by far the biggest compromise I've made in the design. Keeping
+	// 	a full copy of the output buffer from the time that a reader is created
+	// 	is a very naive approach that is very memory and time inefficient. I
+	// 	did this to keep the code simple and with the understanding the
+	// 	challenge was given with "unlimited cpu and unlimited memory". This is
+	// 	not a design I would ever propose for production.
+	//
+	// I think what I would have liked to do instead is use a RWMutex on the
+	// original buffer and let the readers read directly from that and maintain
+	// their own position/index. The problem I had when thinking through this
+	// is that if I imagined a lot of connected readers holding RLocks, then
+	// writes may block for unacceptably long times. I may be able to fix this
+	// by limiting the time that RLocks are held and looping, thereby giving an
+	// opportunity for the write locks to be acquired. I worried that trying to
+	// figure out how to do this correctly and without races would become quite
+	// complex. In keeping with the spirit of the challenge, "do the simplest
+	// thing possible that satisfies the requirements", I chose what I thought
+	// to be the simpler option to implement.
+	//
+	// There is another optimization I could also do to the current
+	// implementation, which would be to discard data from readers once it has
+	// been read. Again, it's more work and not necessarily a requirement, so I
+	// did not choose to implement this either.
+
 	buf := make([]byte, len(data))
 	copy(buf, data)
 
@@ -68,6 +91,14 @@ func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
 
 		go r.receiver()
 	} else {
+		// The job has already completed and we know no new job output will be
+		// coming in. As a result, the state of the reader is simplified in
+		// that it only needs to be a buffer for the data it has right now. It
+		// doesn't need to be added to the map in the SafeBuffer, it doesn't
+		// need a goroutine, the calls to Read() can just defer to the internal
+		// buffer. By closing it immediately, we ensure that clients won't
+		// block indefinitely for jobs that have already completed and for
+		// which they haven't called Close() in a separate goroutine.
 		r.Close()
 	}
 
@@ -89,7 +120,7 @@ func (r *Reader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 
 	n, err := r.buf.Read(p)
-	if err != io.EOF || r.isClosed() {
+	if !errors.Is(err, io.EOF) || r.isClosed() {
 		r.mu.Unlock()
 		return n, err
 	}
@@ -104,12 +135,16 @@ func (r *Reader) Read(p []byte) (int, error) {
 	select {
 	case <-r.closed:
 		// the reader was closed, so we return io.EOF
-		return 0, io.EOF
+		return n, io.EOF
 	case <-dataAvail:
 		// more data was written to buf, so let's return that
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		return r.buf.Read(p)
+		var i int
+		if i, err = r.buf.Read(p); errors.Is(err, io.EOF) {
+			err = nil
+		}
+		return n + i, err
 	}
 }
 

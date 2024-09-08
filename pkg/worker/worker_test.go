@@ -1,8 +1,7 @@
-package jobworker
+package worker
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,9 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/joshuarubin/teleport-job-worker/internal/config"
-	"github.com/joshuarubin/teleport-job-worker/internal/job"
-	"github.com/joshuarubin/teleport-job-worker/internal/user"
+	"github.com/joshuarubin/teleport-job-worker/pkg/job"
 )
 
 func TestMain(m *testing.M) {
@@ -32,26 +29,24 @@ func TestMain(m *testing.M) {
 	}
 }
 
-func newJobWorker() *JobWorker {
+func newJobWorker() *Worker {
 	memoryMax := os.Getenv("GO_TEST_JOB_WORKER_MEMORY_MAX")
 	if memoryMax == "" {
 		memoryMax = "128M"
 	}
 
-	cfg := config.Config{
-		CPUMax:    "25000 100000",
-		MemoryMax: memoryMax,
+	cfg := Config{
+		CPUMax:        "25000 100000",
+		MemoryMax:     memoryMax,
+		ReexecCommand: os.Args[0], // /proc/self/exe doesn't work on mac
+		ReexecEnv:     []string{"GO_TEST_MODE=child"},
 	}
-	r := ReexecCommand{
-		Command: os.Args[0], // /proc/self/exe doesn't work on mac
-		Env:     []string{"GO_TEST_MODE=child"},
-	}
-	return New(&cfg, &r)
+	return New(&cfg)
 }
 
 func child(command string, args ...string) {
 	_ = newJobWorker().
-		StartJobChild(context.Background(), command, args...)
+		StartJobChild(command, args...)
 }
 
 func TestJobWorker(t *testing.T) {
@@ -62,22 +57,21 @@ func TestJobWorker(t *testing.T) {
 		require := require.New(t)
 		assert := assert.New(t)
 
-		ctx := context.Background()
-		userID := user.ID("userID")
+		userID := job.UserID("userID")
 		w := newJobWorker()
 
-		jobID, err := w.StartJob(ctx, userID, "sh", "-c", "while true; do echo y && sleep .1; done")
+		jobID, err := w.StartJob(userID, "sh", "-c", "while true; do echo y && sleep .1; done")
 		require.NoError(err)
 
-		st, err := w.JobStatus(ctx, userID, jobID)
+		st, err := w.JobStatus(userID, jobID)
 		require.NoError(err)
 		assert.Equal(job.StatusRunning, st.Status)
 
-		badUserID := user.ID("foo")
-		_, err = w.JobStatus(ctx, badUserID, jobID)
+		badUserID := job.UserID("foo")
+		_, err = w.JobStatus(badUserID, jobID)
 		require.ErrorIs(ErrJobNotFound, err)
 
-		r, err := w.JobOutput(ctx, userID, jobID)
+		r, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
 
 		p := make([]byte, 2)
@@ -95,10 +89,10 @@ func TestJobWorker(t *testing.T) {
 		_, err = io.ReadAll(r)
 		require.NoError(err)
 
-		err = w.StopJob(ctx, userID, jobID)
+		err = w.StopJob(userID, jobID)
 		require.NoError(err)
 
-		st, err = w.JobStatus(ctx, userID, jobID)
+		st, err = w.JobStatus(userID, jobID)
 		require.NoError(err)
 		assert.Equal(job.StatusStopped, st.Status)
 		require.NotNil(st.ExitCode)
@@ -111,38 +105,36 @@ func TestJobWorker(t *testing.T) {
 		require := require.New(t)
 		assert := assert.New(t)
 
-		ctx := context.Background()
-		userID := user.ID("userID")
+		userID := job.UserID("userID")
 		w := newJobWorker()
 
-		jobID, err := w.StartJob(ctx, userID, "sh", "-c", "true")
+		jobID, err := w.StartJob(userID, "sh", "-c", "true")
 		require.NoError(err)
 
-		r, err := w.JobOutput(ctx, userID, jobID)
+		r, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
 
 		_, err = io.ReadAll(r)
 		require.NoError(err)
 
-		st, err := w.JobStatus(ctx, userID, jobID)
+		st, err := w.JobStatus(userID, jobID)
 		require.NoError(err)
-		assert.Equal(job.StatusComplete, st.Status)
+		assert.Equal(job.StatusCompleted, st.Status)
 	})
 
 	t.Run("multiple-readers", func(t *testing.T) {
 		t.Parallel()
 		require := require.New(t)
 
-		ctx := context.Background()
-		userID := user.ID("userID")
+		userID := job.UserID("userID")
 		w := newJobWorker()
 
-		jobID, err := w.StartJob(ctx, userID, "sh", "-c", "while true; do echo y && sleep .1; done")
+		jobID, err := w.StartJob(userID, "sh", "-c", "while true; do echo y && sleep .1; done")
 		require.NoError(err)
 
-		r0, err := w.JobOutput(ctx, userID, jobID)
+		r0, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
-		r1, err := w.JobOutput(ctx, userID, jobID)
+		r1, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
 
 		errCh0 := make(chan error)
@@ -166,7 +158,7 @@ func TestJobWorker(t *testing.T) {
 
 		time.Sleep(1 * time.Second)
 
-		err = w.StopJob(ctx, userID, jobID)
+		err = w.StopJob(userID, jobID)
 		require.NoError(err)
 
 		err = <-errCh0
@@ -178,21 +170,20 @@ func TestJobWorker(t *testing.T) {
 	t.Run("namespace", func(t *testing.T) {
 		t.Parallel()
 
-		if runtime.GOOS != "linux" {
+		if runtime.GOOS != linuxOS {
 			t.Skip()
 		}
 
 		require := require.New(t)
 		assert := assert.New(t)
 
-		ctx := context.Background()
-		userID := user.ID("userID")
+		userID := job.UserID("userID")
 		w := newJobWorker()
 
-		jobID, err := w.StartJob(ctx, userID, "sh", "-c", "echo $$")
+		jobID, err := w.StartJob(userID, "sh", "-c", "echo $$")
 		require.NoError(err)
 
-		r, err := w.JobOutput(ctx, userID, jobID)
+		r, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
 
 		data, err := io.ReadAll(r)
@@ -204,34 +195,33 @@ func TestJobWorker(t *testing.T) {
 	t.Run("cgroup", func(t *testing.T) {
 		t.Parallel()
 
-		if runtime.GOOS != "linux" {
+		if runtime.GOOS != linuxOS {
 			t.Skip()
 		}
 
 		require := require.New(t)
 		assert := assert.New(t)
 
-		ctx := context.Background()
-		userID := user.ID("userID")
+		userID := job.UserID("userID")
 		w := newJobWorker()
-		w.reexec.Env = append(w.reexec.Env,
+		w.cfg.ReexecEnv = append(w.cfg.ReexecEnv,
 			// anything should need more than 1B of memory, right?
 			"GO_TEST_JOB_WORKER_MEMORY_MAX=1",
 		)
 
-		jobID, err := w.StartJob(ctx, userID, "yes")
+		jobID, err := w.StartJob(userID, "yes")
 		require.NoError(err)
 
-		r, err := w.JobOutput(ctx, userID, jobID)
+		r, err := w.JobOutput(userID, jobID)
 		require.NoError(err)
 
 		data, err := io.ReadAll(r)
 		require.NoError(err)
 		assert.Empty(data)
 
-		st, err := w.JobStatus(ctx, userID, jobID)
+		st, err := w.JobStatus(userID, jobID)
 		require.NoError(err)
-		assert.Equal(job.StatusComplete, st.Status)
+		assert.Equal(job.StatusCompleted, st.Status)
 		require.NotNil(st.ExitCode)
 		assert.Equal(-1, st.ExitCode.Int())
 		assert.Error(st.Error)
