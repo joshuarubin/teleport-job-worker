@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -29,15 +30,21 @@ func TestMain(m *testing.M) {
 	}
 }
 
-func newJobWorker() *Worker {
-	memoryMax := os.Getenv("GO_TEST_JOB_WORKER_MEMORY_MAX")
-	if memoryMax == "" {
-		memoryMax = "128M"
+func newJobWorker() (*Worker, error) {
+	memoryMax := uint32(134217728)
+	if v := os.Getenv("GO_TEST_JOB_WORKER_MEMORY_MAX"); v != "" {
+		m, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, err
+		}
+		memoryMax = uint32(m)
 	}
 
 	cfg := Config{
-		CPUMax:        "25000 100000",
+		CPUMax:        .25,
 		MemoryMax:     memoryMax,
+		RIOPSMax:      100,
+		WIOPSMax:      10,
 		ReexecCommand: os.Args[0], // /proc/self/exe doesn't work on mac
 		ReexecEnv:     []string{"GO_TEST_MODE=child"},
 	}
@@ -45,8 +52,14 @@ func newJobWorker() *Worker {
 }
 
 func child(command string, args ...string) {
-	_ = newJobWorker().
-		StartJobChild(command, args...)
+	w, err := newJobWorker()
+	if err != nil {
+		panic(err)
+	}
+	err = w.StartJobChild(command, args...)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func TestJobWorker(t *testing.T) {
@@ -58,7 +71,8 @@ func TestJobWorker(t *testing.T) {
 		assert := assert.New(t)
 
 		userID := job.UserID("userID")
-		w := newJobWorker()
+		w, err := newJobWorker()
+		require.NoError(err)
 
 		jobID, err := w.StartJob(userID, "sh", "-c", "while true; do echo y && sleep .1; done")
 		require.NoError(err)
@@ -106,7 +120,8 @@ func TestJobWorker(t *testing.T) {
 		assert := assert.New(t)
 
 		userID := job.UserID("userID")
-		w := newJobWorker()
+		w, err := newJobWorker()
+		require.NoError(err)
 
 		jobID, err := w.StartJob(userID, "sh", "-c", "true")
 		require.NoError(err)
@@ -127,7 +142,8 @@ func TestJobWorker(t *testing.T) {
 		require := require.New(t)
 
 		userID := job.UserID("userID")
-		w := newJobWorker()
+		w, err := newJobWorker()
+		require.NoError(err)
 
 		jobID, err := w.StartJob(userID, "sh", "-c", "while true; do echo y && sleep .1; done")
 		require.NoError(err)
@@ -178,7 +194,8 @@ func TestJobWorker(t *testing.T) {
 		assert := assert.New(t)
 
 		userID := job.UserID("userID")
-		w := newJobWorker()
+		w, err := newJobWorker()
+		require.NoError(err)
 
 		jobID, err := w.StartJob(userID, "sh", "-c", "echo $$")
 		require.NoError(err)
@@ -203,7 +220,8 @@ func TestJobWorker(t *testing.T) {
 		assert := assert.New(t)
 
 		userID := job.UserID("userID")
-		w := newJobWorker()
+		w, err := newJobWorker()
+		require.NoError(err)
 		w.cfg.ReexecEnv = append(w.cfg.ReexecEnv,
 			// anything should need more than 1B of memory, right?
 			"GO_TEST_JOB_WORKER_MEMORY_MAX=1",

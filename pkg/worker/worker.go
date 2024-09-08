@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -25,9 +27,10 @@ type Config struct {
 	ReexecCommand string   // often "/proc/self/exe"
 	ReexecArgs    []string // usually a command that puts this binary in a different "mode", e.g. "child" or "helper"
 	ReexecEnv     []string // additional env variables, in the form of "key=value", to be added to the current os.Environ()
-	CPUMax        string   // the value for cpu.max in the cgroup
-	MemoryMax     string   // the value for memory.max in the cgroup
-	IOMax         []string // the values for io.max in the cgroup, per-device
+	CPUMax        float32  // the maximum cpu usage as a decimal, 0 < value <= 1, 0 indicates no max
+	MemoryMax     uint32   // the maximum memory usage in bytes, 0 indicates no max
+	RIOPSMax      uint32   // the maximum read io operations per second, 0 indicates no max
+	WIOPSMax      uint32   // the maximum write io operations per second, 0 indicates no max
 }
 
 // copy returns a deep copy of Config
@@ -36,6 +39,8 @@ func (c *Config) copy() *Config {
 		ReexecCommand: c.ReexecCommand,
 		CPUMax:        c.CPUMax,
 		MemoryMax:     c.MemoryMax,
+		RIOPSMax:      c.RIOPSMax,
+		WIOPSMax:      c.WIOPSMax,
 	}
 
 	ret.ReexecArgs = make([]string, len(c.ReexecArgs))
@@ -43,9 +48,6 @@ func (c *Config) copy() *Config {
 
 	ret.ReexecEnv = make([]string, len(c.ReexecEnv))
 	copy(ret.ReexecEnv, c.ReexecEnv)
-
-	ret.IOMax = make([]string, len(c.IOMax))
-	copy(ret.IOMax, c.IOMax)
 
 	return &ret
 }
@@ -58,16 +60,99 @@ type Worker struct {
 	rootCGroupCreateErr  error
 	rootCGroupName       string
 
+	blockDevices []string
+
 	mu   sync.RWMutex
 	jobs map[job.ID]*job.Job
 }
 
+var (
+	// ErrReexecCommandRequired is returned by New if ReexecCommand is empty
+	ErrReexecCommandRequired = errors.New("reexec command is required")
+
+	// ErrInvalidCPUMax is returned by New if the value of config.CPUMax is
+	// invalid
+	ErrInvalidCPUMax = errors.New("cpu max can not be less than 0 or greater than 1")
+
+	// ErrJobNotFound is returned when trying to stop, get status or get output
+	// of a job that doesn't exist or that the user is not authorized for.
+	ErrJobNotFound = errors.New("job not found")
+)
+
 // New creates a new JobWorker
-func New(config *Config) *Worker {
-	return &Worker{
-		cfg:  config.copy(),
-		jobs: map[job.ID]*job.Job{},
+func New(config *Config) (*Worker, error) {
+	if config.ReexecCommand == "" {
+		return nil, ErrReexecCommandRequired
 	}
+
+	if config.CPUMax < 0 || config.CPUMax > 1 {
+		return nil, ErrInvalidCPUMax
+	}
+
+	blockDevices, err := getBlockDevices()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Worker{
+		// make a copy to ensure config is externally immutable
+		cfg:          config.copy(),
+		jobs:         map[job.ID]*job.Job{},
+		blockDevices: blockDevices,
+	}, nil
+}
+
+// getBlockDevices returns a list of MAJOR:MINOR block devices that can be used
+// for setting io limits in io.max for cgroups
+func getBlockDevices() ([]string, error) {
+	if runtime.GOOS != linuxOS {
+		return nil, nil
+	}
+
+	var names []string //nolint:prealloc
+
+	// first list all available block devices
+	dir, err := os.ReadDir("/sys/block")
+	if err != nil {
+		return nil, err
+	}
+
+	// filter out loop devices
+	for _, f := range dir {
+		if strings.HasPrefix(f.Name(), "loop") {
+			continue
+		}
+		names = append(names, f.Name())
+	}
+
+	// /proc/partitions lists the major and minor device numbers of all
+	// partitions including root devices
+	f, err := os.Open("/proc/partitions")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	ret := make([]string, 0, len(names))
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// the lines we're looking for look like:
+		//  253        0  104857600 vda
+		for _, name := range names {
+			// so we look for those that end with one of the device names we
+			// pulled out earlier
+			if strings.HasSuffix(line, name) {
+				// then we extract the first 2 fields as MAJOR:MINOR
+				if fields := strings.Fields(line); len(fields) >= 2 { //nolint:mnd
+					ret = append(ret, fmt.Sprintf("%s:%s", fields[0], fields[1]))
+				}
+				break
+			}
+		}
+	}
+
+	return ret, nil
 }
 
 // StartJob executes command, with optional args, in a new pid, mount and
@@ -143,22 +228,31 @@ func (w *Worker) createCGroup() error {
 		file: "cgroup.procs", value: strconv.Itoa(os.Getpid()),
 	}}
 
-	if v := w.cfg.CPUMax; v != "" {
+	if v := w.cfg.CPUMax; v != 0 {
+		const maxCPU = 100000
+		d := int64(v * float32(maxCPU))
 		cgroupData = append(cgroupData, cgroupValue{
-			file: "cpu.max", value: v,
+			file: "cpu.max", value: fmt.Sprintf("%d %d", d, maxCPU),
 		})
 	}
 
-	if v := w.cfg.MemoryMax; v != "" {
+	if v := w.cfg.MemoryMax; v != 0 {
 		cgroupData = append(cgroupData, cgroupValue{
-			file: "memory.max", value: v,
+			file: "memory.max", value: strconv.Itoa(int(v)),
 		})
 	}
 
-	for _, v := range w.cfg.IOMax {
-		if v != "" {
+	if w.cfg.RIOPSMax > 0 || w.cfg.WIOPSMax > 0 {
+		for _, v := range w.blockDevices {
+			s := v
+			if w.cfg.RIOPSMax > 0 {
+				s += fmt.Sprintf(" riops=%d", w.cfg.RIOPSMax)
+			}
+			if w.cfg.WIOPSMax > 0 {
+				s += fmt.Sprintf(" wiops=%d", w.cfg.WIOPSMax)
+			}
 			cgroupData = append(cgroupData, cgroupValue{
-				file: "io.max", value: v,
+				file: "io.max", value: s,
 			})
 		}
 	}
@@ -166,7 +260,7 @@ func (w *Worker) createCGroup() error {
 	for _, v := range cgroupData {
 		file := filepath.Join(subCGroup, v.file)
 		if err = os.WriteFile(file, []byte(v.value), cgroupFilePerm); err != nil {
-			return fmt.Errorf("error writing to cgroup file %q: %w", file, err)
+			return fmt.Errorf("error writing to cgroup file %q (value: %q): %w", file, v.value, err)
 		}
 	}
 
@@ -219,10 +313,6 @@ func (w *Worker) StartJobChild(command string, args ...string) error {
 
 	return nil
 }
-
-// ErrJobNotFound is returned when trying to stop, get status or get output of a
-// job that doesn't exist or that the user is not authorized for.
-var ErrJobNotFound = errors.New("job not found")
 
 func (w *Worker) getJob(userID job.UserID, jobID job.ID) (*job.Job, error) {
 	w.mu.RLock()

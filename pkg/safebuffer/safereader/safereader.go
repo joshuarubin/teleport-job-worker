@@ -20,10 +20,10 @@ type Reader struct {
 	closeOnce sync.Once
 }
 
-// jobIsRunning doesn't have a race because Buffer.NewReader calls it while
+// jobIsDone doesn't have a race because Buffer.NewReader calls it while
 // holding a lock that prevents new data, or the close of jobDone, from being
 // processed.
-func jobIsRunning(jobDone <-chan struct{}) bool {
+func jobIsDone(jobDone <-chan struct{}) bool {
 	select {
 	case <-jobDone:
 		return false
@@ -73,6 +73,9 @@ func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
 	copy(buf, data)
 
 	r := Reader{
+		// closeFn is called by r.Close(), the close channel is monitored so
+		// that blocking reads and goroutines can break when the reader is
+		// closed
 		close:  closeFn,
 		closed: closed,
 		buf:    bytes.NewBuffer(buf),
@@ -80,7 +83,7 @@ func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
 
 	var channels *Channels
 
-	if jobIsRunning(jobDone) {
+	if jobIsDone(jobDone) {
 		dataCh := make(chan []byte)
 		channels = &Channels{
 			Data:   dataCh,
@@ -89,6 +92,8 @@ func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
 		r.dataCh = dataCh
 		r.dataAvail = make(chan struct{})
 
+		// This goroutine is required to so that reads and writes to the data
+		// channel can't deadlock.
 		go r.receiver()
 	} else {
 		// The job has already completed and we know no new job output will be

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 
 	"github.com/joshuarubin/teleport-job-worker/pkg/safebuffer"
 )
@@ -24,7 +23,7 @@ type Job struct {
 	stopOnce sync.Once
 	stopErr  error
 
-	status atomic.Uint32
+	status Status
 
 	done chan struct{}
 
@@ -33,6 +32,20 @@ type Job struct {
 	exitCode *ExitCode
 }
 
+var (
+	// ErrUserIDRequired is returned by New if user id is
+	// empty
+	ErrUserIDRequired = errors.New("user id is required")
+
+	// ErrCommandRequired is returned by New if command is
+	// empty
+	ErrCommandRequired = errors.New("command is required")
+
+	// ErrAlreadyStarted is returned when trying to start a
+	// job that has already been started
+	ErrAlreadyStarted = errors.New("already started")
+)
+
 // New creates, but does not start a new job
 func New(
 	userID UserID,
@@ -40,6 +53,13 @@ func New(
 	args []string,
 	env []string,
 ) (*Job, error) {
+	if userID == "" {
+		return nil, ErrUserIDRequired
+	}
+	if command == "" {
+		return nil, ErrCommandRequired
+	}
+
 	id, err := NewID()
 	if err != nil {
 		return nil, err
@@ -66,10 +86,6 @@ func New(
 	return &j, nil
 }
 
-// ErrAlreadyStarted is returned when trying to start a job that has already
-// been started
-var ErrAlreadyStarted = errors.New("already started")
-
 // Start the job process. If Start() is called more than once ErrAlreadyStarted
 // will be returned.
 func (j *Job) Start() error {
@@ -91,6 +107,9 @@ func (j *Job) Start() error {
 	return nil
 }
 
+// wait for the command to finish. sets the error returned by the command, if
+// any, extracts any exit code, sets status to completed and closes the done
+// channel
 func (j *Job) wait() {
 	defer func() {
 		j.setStatus(StatusCompleted)
@@ -102,6 +121,7 @@ func (j *Job) wait() {
 	var ec ExitCode
 
 	if j.cmdErr == nil {
+		// nil error implies 0 exit code
 		j.exitCode = &ec
 		return
 	}
@@ -136,27 +156,21 @@ func (j *Job) Done() <-chan struct{} {
 }
 
 // setStatus sets the job status. status can only move to higher values:
-// not_started -> running -> complete -> stopped
+// not_started -> running -> completed -> stopped
 func (j *Job) setStatus(st Status) {
-	for {
-		cur := j.Status()
-		if st <= cur {
-			return
-		}
-
-		if j.status.CompareAndSwap(uint32(cur), uint32(st)) { //nolint:gosec,nolintlint
-			return
-		}
+	if st <= j.status {
+		return
 	}
+	j.status = st
 }
 
 // Status returns the job's status
 func (j *Job) Status() Status {
-	return Status(j.status.Load())
+	return j.status
 }
 
-// IsRunning returns whether or not the job process is still running
-func (j *Job) IsRunning() bool {
+// isDone returns whether or not the job process is still running
+func (j *Job) isDone() bool {
 	select {
 	case <-j.done:
 		return false
@@ -168,7 +182,7 @@ func (j *Job) IsRunning() bool {
 // Error returns the error returned by exec.Command. It will return nil if the
 // command is still running.
 func (j *Job) Error() error {
-	if j.IsRunning() {
+	if j.isDone() {
 		return nil
 	}
 	return j.cmdErr
@@ -180,7 +194,7 @@ func (j *Job) Error() error {
 // In the case the process was stopped or signaled in some other way, it may
 // have completed without a valid exit code and may be nil.
 func (j *Job) ExitCode() *ExitCode {
-	if j.IsRunning() {
+	if j.isDone() {
 		return nil
 	}
 	return j.exitCode
@@ -193,7 +207,7 @@ func (j *Job) ExitCode() *ExitCode {
 // nothing.
 func (j *Job) Stop() error {
 	j.stopOnce.Do(func() {
-		if !j.IsRunning() {
+		if !j.isDone() {
 			return
 		}
 

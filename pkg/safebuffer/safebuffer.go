@@ -78,6 +78,18 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		default:
 			v := make([]byte, len(p))
 			copy(v, p)
+
+			// The reader's receiver runs in its own goroutine where it writes
+			// to its own buffer. It does need to take a lock when writing so
+			// there is no contention while the reader's buffer is being read by
+			// clients. It holds the lock for the shortest period possible while
+			// reading and writing to the reader buffer. While there may be a
+			// very brief stutter, it is never be dependent on
+			// external/uncontrollable factors (like the client reading the
+			// io.ReadCloser) as to how quickly it can be consumed. As such,
+			// there is no direct concern regarding the speed at which clients
+			// consume data from the reader causing sends to this channel to
+			// block
 			dataCh <- v
 		}
 	}
