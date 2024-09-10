@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sync"
 
 	"github.com/joshuarubin/teleport-job-worker/pkg/safebuffer"
 )
@@ -16,16 +15,8 @@ type Job struct {
 	userID UserID
 	cmd    *exec.Cmd
 	buf    *safebuffer.Buffer
-
-	startOnce sync.Once
-	startErr  error
-
-	stopOnce sync.Once
-	stopErr  error
-
 	status Status
-
-	done chan struct{}
+	done   chan struct{}
 
 	// these values are only safe to read after done has closed
 	cmdErr   error
@@ -40,10 +31,6 @@ var (
 	// ErrCommandRequired is returned by New if command is
 	// empty
 	ErrCommandRequired = errors.New("command is required")
-
-	// ErrAlreadyStarted is returned when trying to start a
-	// job that has already been started
-	ErrAlreadyStarted = errors.New("already started")
 )
 
 // New creates, but does not start a new job
@@ -65,12 +52,10 @@ func New(
 		return nil, err
 	}
 
-	done := make(chan struct{})
-
 	j := Job{
 		id:     id,
 		userID: userID,
-		done:   done,
+		done:   make(chan struct{}),
 		cmd:    exec.Command(command, args...),
 	}
 
@@ -86,25 +71,14 @@ func New(
 	return &j, nil
 }
 
-// Start the job process. If Start() is called more than once ErrAlreadyStarted
-// will be returned.
+// Start the job process
 func (j *Job) Start() error {
-	var started bool
-	j.startOnce.Do(func() {
-		if j.startErr = j.cmd.Start(); j.startErr != nil {
-			j.setStatus(StatusStartError)
-			return
-		}
-		j.setStatus(StatusRunning)
-		started = true
-		go j.wait()
-	})
-	if j.startErr != nil {
-		return j.startErr
+	if err := j.cmd.Start(); err != nil {
+		j.setStatus(StatusStartError)
+		return err
 	}
-	if !started {
-		return ErrAlreadyStarted
-	}
+	j.setStatus(StatusRunning)
+	go j.wait()
 	return nil
 }
 
@@ -123,7 +97,6 @@ func (j *Job) wait() {
 	j.cmdErr = j.cmd.Wait()
 
 	var ec ExitCode
-
 	if j.cmdErr == nil {
 		// nil error implies 0 exit code
 		j.exitCode = &ec
@@ -210,25 +183,10 @@ func (j *Job) ExitCode() *ExitCode {
 // value. If the process had already completed when first called, Stop() does
 // nothing.
 func (j *Job) Stop() error {
-	j.stopOnce.Do(func() {
-		if !j.isDone() {
-			return
-		}
-
-		err := j.cmd.Process.Kill()
-		if errors.Is(err, os.ErrProcessDone) {
-			// there was a race, job wasn't done when Stop() was first called,
-			// but it was by the time the signal was sent
-			return
-		}
-		if err != nil {
-			j.stopErr = err
-			return
-		}
-
-		<-j.done
-		j.setStatus(StatusStopped)
-	})
-
-	return j.stopErr
+	if err := j.cmd.Process.Kill(); err != nil {
+		return err
+	}
+	<-j.done
+	j.setStatus(StatusStopped)
+	return nil
 }

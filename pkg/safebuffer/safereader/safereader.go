@@ -1,6 +1,7 @@
 package safereader
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -11,14 +12,11 @@ import (
 type Reader struct {
 	Buffer
 
-	offsetMu sync.Mutex
-	offset   int
+	cancel func()
+	closed func() <-chan struct{}
 
-	closeOnce sync.Once
-	close     func()
-	closed    <-chan struct{}
-
-	wakeMu sync.Mutex
+	mu     sync.RWMutex
+	offset int
 	wake   chan struct{}
 }
 
@@ -35,7 +33,7 @@ func (r *Reader) jobIsDone() bool {
 // IsClosed returns true if the reader has been closed
 func (r *Reader) IsClosed() bool {
 	select {
-	case <-r.closed:
+	case <-r.closed():
 		return true
 	default:
 		return false
@@ -46,18 +44,18 @@ func (r *Reader) IsClosed() bool {
 // Wake()
 func (r *Reader) Await() <-chan struct{} {
 	var ch chan struct{}
-	r.wakeMu.Lock()
+	r.mu.RLock()
 	ch = r.wake
-	r.wakeMu.Unlock()
+	r.mu.RUnlock()
 	return ch
 }
 
 // Wake is called after the Buffer has written new data
 func (r *Reader) Wake() {
-	r.wakeMu.Lock()
+	r.mu.Lock()
 	close(r.wake)
 	r.wake = make(chan struct{})
-	r.wakeMu.Unlock()
+	r.mu.Unlock()
 }
 
 // Buffer is used to prevent an import cycle
@@ -69,11 +67,11 @@ type Buffer interface {
 // New returns a new Reader that will read from the beginning of Buffer until
 // io.EOF is returned after Done() closes.
 func New(b Buffer) *Reader {
-	closed := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Reader{
-		close:  func() { close(closed) },
-		closed: closed,
+		cancel: cancel,
+		closed: ctx.Done,
 		wake:   make(chan struct{}),
 		Buffer: b,
 	}
@@ -82,8 +80,8 @@ func New(b Buffer) *Reader {
 // readOffset safely reads from the buffer into p and updates the offset by the
 // number of bytes read
 func (r *Reader) readOffset(p []byte) (int, error) {
-	r.offsetMu.Lock()
-	defer r.offsetMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	n, err := r.ReadOffset(r.offset, p)
 	if err == nil {
@@ -112,7 +110,7 @@ func (r *Reader) Read(p []byte) (int, error) {
 		// got io.EOF and job isn't done yet
 		select {
 		case <-r.Await():
-		case <-r.closed:
+		case <-r.closed():
 			return n, ErrReaderClosed
 		case <-r.Done():
 			return n, io.EOF
@@ -124,6 +122,6 @@ func (r *Reader) Read(p []byte) (int, error) {
 // from its resources. Any Reads after being closed will return
 // ErrReaderClosed.
 func (r *Reader) Close() error {
-	r.closeOnce.Do(r.close)
+	r.cancel()
 	return nil
 }

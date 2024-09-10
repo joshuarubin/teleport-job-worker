@@ -54,13 +54,9 @@ func (c *Config) copy() *Config {
 
 // Worker is an implementation of the Worker interface
 type Worker struct {
-	cfg *Config
-
-	createRootCGroupOnce sync.Once
-	rootCGroupCreateErr  error
-	rootCGroupName       string
-
-	blockDevices []string
+	cfg            *Config
+	rootCGroupName string
+	blockDevices   []string
 
 	mu   sync.RWMutex
 	jobs map[job.ID]*job.Job
@@ -94,12 +90,20 @@ func New(config *Config) (*Worker, error) {
 		return nil, err
 	}
 
-	return &Worker{
+	w := Worker{
 		// make a copy to ensure config is externally immutable
 		cfg:          config.copy(),
 		jobs:         map[job.ID]*job.Job{},
 		blockDevices: blockDevices,
-	}, nil
+	}
+
+	if runtime.GOOS == linuxOS {
+		if err = w.createRootCGroup(); err != nil {
+			return nil, err
+		}
+	}
+
+	return &w, nil
 }
 
 // getBlockDevices returns a list of MAJOR:MINOR block devices that can be used
@@ -193,22 +197,23 @@ const cgroupFilePerm = 0o400
 // createRootCGroup creates the root cgroup. this is only done once. sets the
 // proper values on cgroup.subtree_control so that cpu, memory and io can be
 // managed on leaf cgroups.
-func (w *Worker) createRootCGroup() {
+func (w *Worker) createRootCGroup() error {
 	// Requires cgroup v2.
 	const prefix = "/sys/fs/cgroup"
 
 	cg, err := os.MkdirTemp(prefix, "job-worker-")
 	if err != nil {
-		w.rootCGroupCreateErr = fmt.Errorf("error creating root cgroup: %w", err)
-		return
+		return fmt.Errorf("error creating root cgroup: %w", err)
 	}
 
 	w.rootCGroupName = cg
 
 	err = os.WriteFile(filepath.Join(cg, "cgroup.subtree_control"), []byte("+cpu +memory +io"), cgroupFilePerm)
 	if err != nil {
-		w.rootCGroupCreateErr = fmt.Errorf("error writing cgroup.subtree_control: %w", err)
+		return fmt.Errorf("error writing cgroup.subtree_control: %w", err)
 	}
+
+	return nil
 }
 
 // createCGroup creates a cgroup and sets the values for cpu.max, memory.max
@@ -284,13 +289,6 @@ func (w *Worker) StartJobChild(command string, args ...string) error {
 	}
 
 	if runtime.GOOS == linuxOS {
-		w.createRootCGroupOnce.Do(w.createRootCGroup)
-		if w.rootCGroupCreateErr != nil {
-			err = fmt.Errorf("error creating root cgroup: %w", w.rootCGroupCreateErr)
-			slog.Error("error starting child process", "err", err)
-			return err
-		}
-
 		if err = w.createCGroup(); err != nil {
 			err = fmt.Errorf("error creating cgroup: %w", err)
 			slog.Error("error starting child process", "err", err)
