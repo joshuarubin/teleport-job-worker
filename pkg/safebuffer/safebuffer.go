@@ -1,9 +1,7 @@
 package safebuffer
 
 import (
-	"bytes"
 	"io"
-	"sync"
 
 	"github.com/joshuarubin/teleport-job-worker/pkg/safebuffer/safereader"
 )
@@ -12,10 +10,7 @@ import (
 // provides io.ReadClosers to replay and continue to stream incoming data.
 type Buffer struct {
 	Readers
-
-	bufMu sync.RWMutex
-	buf   bytes.Buffer
-
+	ByteBuffer
 	done <-chan struct{}
 }
 
@@ -30,9 +25,7 @@ func New(done <-chan struct{}) *Buffer {
 // Write is the io.Writer interface that writes to the buffer and notifies
 // readers that more data is available
 func (b *Buffer) Write(p []byte) (int, error) {
-	b.bufMu.Lock()
-	n, werr := b.buf.Write(p)
-	b.bufMu.Unlock()
+	n, werr := b.ByteBuffer.Write(p)
 
 	for it := b.Iterator(); it.Next(); {
 		reader := it.Reader()
@@ -46,25 +39,6 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	}
 
 	return n, werr
-}
-
-// ReadOffset is called by readers to read from a given offset into p
-func (b *Buffer) ReadOffset(offset int, p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	b.bufMu.RLock()
-	defer b.bufMu.RUnlock()
-
-	data := b.buf.Bytes()
-
-	if len(data) <= offset {
-		return 0, io.EOF
-	}
-
-	n := copy(p, data[offset:])
-	return n, nil
 }
 
 // Done returns a channel that's closed when the done channel passed into New()

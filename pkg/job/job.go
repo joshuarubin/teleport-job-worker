@@ -117,6 +117,9 @@ func (j *Job) wait() {
 		close(j.done)
 	}()
 
+	// NOTE: cmdErr and exitCode must be written before closing done to avoid
+	// races
+
 	j.cmdErr = j.cmd.Wait()
 
 	var ec ExitCode

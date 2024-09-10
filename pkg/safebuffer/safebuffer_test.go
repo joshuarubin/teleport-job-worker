@@ -43,7 +43,7 @@ func TestSafeBuffer(t *testing.T) {
 		}
 
 		require.NoError(err)
-		assert.Equal("foofoofoo", buf.buf.String())
+		assert.Equal("foofoofoo", buf.String())
 
 		// 2. Synchronous read everything from the buffer
 		r0 := buf.NewReader()
@@ -100,7 +100,7 @@ func TestSafeBuffer(t *testing.T) {
 		}
 
 		require.NoError(err)
-		assert.Equal("foofoofoo", buf.buf.String())
+		assert.Equal("foofoofoo", buf.String())
 
 		close(jobDone)
 
@@ -131,7 +131,7 @@ func TestSafeBuffer(t *testing.T) {
 		}
 
 		require.NoError(err)
-		assert.Equal("foofoofoo", buf.buf.String())
+		assert.Equal("foofoofoo", buf.String())
 
 		r := buf.NewReader()
 		b := make([]byte, 9)
