@@ -38,25 +38,38 @@ func (c *Readers) Iterator() *ReadersIterator {
 func (i *ReadersIterator) Next() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.nextNoLock()
+}
 
-	if i.pos+1 >= len(i.list) {
-		return false
+func (i *ReadersIterator) nextNoLock() bool {
+	for i.pos+1 < len(i.list) {
+		i.pos++
+		if i.list[i.pos].IsClosed() {
+			i.deleteNoLock()
+			continue
+		}
+		return true
 	}
 
-	i.pos++
-	return true
+	return false
 }
 
 // Reader returns the current reader
 func (i *ReadersIterator) Reader() *safereader.Reader {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
+	for {
+		i.mu.RLock()
+		if i.pos >= len(i.list) {
+			i.mu.RUnlock()
+			return nil
+		}
+		r := i.list[i.pos]
+		i.mu.RUnlock()
 
-	if i.pos >= len(i.list) {
-		return nil
+		if !r.IsClosed() {
+			return r
+		}
+		i.Delete()
 	}
-
-	return i.list[i.pos]
 }
 
 // Delete the current iterator from the list
@@ -64,9 +77,14 @@ func (i *ReadersIterator) Delete() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	i.deleteNoLock()
+}
+
+func (i *ReadersIterator) deleteNoLock() {
 	if i.pos >= len(i.list) {
 		return
 	}
 
 	i.list = append(i.list[:i.pos], i.list[i.pos+1:]...)
+	i.pos--
 }
