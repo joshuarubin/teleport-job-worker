@@ -138,7 +138,7 @@ func TestSafeBuffer(t *testing.T) {
 		n, err := r.Read(b)
 		assert.Equal(9, n)
 		require.NoError(err)
-		assert.Equal("foofoofoo", string(b))
+		assert.Equal("foofoofoo", string(b[:n]))
 
 		err = <-bufWrite(buf, "bar")
 		require.NoError(err)

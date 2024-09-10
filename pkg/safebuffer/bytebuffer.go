@@ -2,20 +2,38 @@ package safebuffer
 
 import (
 	"io"
+	"strings"
 	"sync"
+	"sync/atomic"
 )
 
-// ByteBuffer implements a goroutine safe buffer
+// byteNode is a linked list node
+type byteNode struct {
+	data []byte
+	next atomic.Pointer[byteNode]
+}
+
+// ByteBuffer implements a goroutine safe buffer implemented with an immutable
+// linked list. it uses a mutex when reading and modifying its own values, but
+// does not need any lock once it begins walking the list.
 type ByteBuffer struct {
-	mu  sync.RWMutex
-	buf []byte
+	mu        sync.RWMutex
+	root, end *byteNode
+	size      int
 }
 
 // String returns the buffered data as a string
 func (b *ByteBuffer) String() string {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return string(b.buf)
+	node := b.root
+	b.mu.RUnlock()
+
+	var s strings.Builder
+	for node != nil {
+		s.Write(node.data)
+		node = node.next.Load()
+	}
+	return s.String()
 }
 
 // ReadOffset is called by readers to read from a given offset into p
@@ -25,36 +43,58 @@ func (b *ByteBuffer) ReadOffset(offset int, p []byte) (int, error) {
 	}
 
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.buf) <= offset {
+	if b.size <= offset {
+		b.mu.RUnlock()
 		return 0, io.EOF
 	}
+	node := b.root
+	b.mu.RUnlock()
 
-	return copy(p, b.buf[offset:]), nil
+	var n int
+	for node != nil {
+		if offset >= len(node.data) {
+			offset -= len(node.data)
+			node = node.next.Load()
+			continue
+		}
+
+		i := copy(p, node.data[offset:])
+		n += i
+		if i == len(p) {
+			break
+		}
+		p = p[i:]
+		offset = 0
+		node = node.next.Load()
+	}
+
+	if n > 0 {
+		return n, nil
+	}
+
+	return 0, io.EOF
 }
-
-// minBufferSize is the minimum size buffer a new ByteBuffer will use
-const minBufferSize = 64
 
 // Write is the io.Writer interface that writes to the buffer
 func (b *ByteBuffer) Write(p []byte) (int, error) {
+	node := byteNode{
+		data: make([]byte, len(p)),
+	}
+	n := copy(node.data, p)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.buf == nil {
-		b.buf = make([]byte, 0, max(minBufferSize, len(p)*2)) //nolint:mnd
+	if b.root == nil {
+		b.root = &node
+		b.end = &node
+		b.size = len(node.data)
+		return n, nil
 	}
 
-	n := len(p)
-	l := len(b.buf)
-	if n <= cap(b.buf)-l {
-		b.buf = b.buf[:l+n]
-	} else {
-		c := max(len(b.buf)+n, 2*cap(b.buf)) //nolint:mnd
-		newBuf := make([]byte, l+n, c)
-		copy(newBuf, b.buf)
-		b.buf = newBuf
-	}
-	return copy(b.buf[l:], p), nil
+	b.end.next.Store(&node)
+	b.end = &node
+	b.size += len(node.data)
+
+	return n, nil
 }
