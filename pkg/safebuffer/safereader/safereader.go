@@ -1,116 +1,39 @@
 package safereader
 
 import (
-	"bytes"
 	"errors"
 	"io"
-	"log/slog"
 	"sync"
 )
 
-// Reader is a goroutine safe io.ReadCloser that makes initial data available to
-// callers as well as new data that arrives later via channel.
+// Reader is a goroutine safe io.ReadCloser that streams Buffer data from the
+// beginning
 type Reader struct {
-	mu        sync.Mutex
-	buf       *bytes.Buffer
+	Buffer
+
+	offsetMu sync.Mutex
+	offset   int
+
+	closeOnce sync.Once
 	close     func()
 	closed    <-chan struct{}
-	dataCh    <-chan []byte
-	dataAvail chan struct{}
-	closeOnce sync.Once
+
+	wakeMu sync.Mutex
+	wake   chan struct{}
 }
 
-// jobIsDone doesn't have a race because Buffer.NewReader calls it while
-// holding a lock that prevents new data, or the close of jobDone, from being
-// processed.
-func jobIsDone(jobDone <-chan struct{}) bool {
+// jobIsDone returns true if the job has completed
+func (r *Reader) jobIsDone() bool {
 	select {
-	case <-jobDone:
-		return false
-	default:
+	case <-r.Done():
 		return true
+	default:
+		return false
 	}
 }
 
-type Channels struct {
-	Data   chan []byte
-	Closed <-chan struct{}
-}
-
-// New returns a new Reader that keeps a copy of data and will append any data
-// that arrives on the returned Data channel. If the job is no longer running
-// when created, it is treated as a closed reader and no new data can be added.
-// Calls to Close() in this case are ignored.
-func New(data []byte, jobDone <-chan struct{}) (*Reader, *Channels) {
-	closed := make(chan struct{})
-	closeFn := func() { close(closed) }
-
-	// 	This is by far the biggest compromise I've made in the design. Keeping
-	// 	a full copy of the output buffer from the time that a reader is created
-	// 	is a very naive approach that is very memory and time inefficient. I
-	// 	did this to keep the code simple and with the understanding the
-	// 	challenge was given with "unlimited cpu and unlimited memory". This is
-	// 	not a design I would ever propose for production.
-	//
-	// I think what I would have liked to do instead is use a RWMutex on the
-	// original buffer and let the readers read directly from that and maintain
-	// their own position/index. The problem I had when thinking through this
-	// is that if I imagined a lot of connected readers holding RLocks, then
-	// writes may block for unacceptably long times. I may be able to fix this
-	// by limiting the time that RLocks are held and looping, thereby giving an
-	// opportunity for the write locks to be acquired. I worried that trying to
-	// figure out how to do this correctly and without races would become quite
-	// complex. In keeping with the spirit of the challenge, "do the simplest
-	// thing possible that satisfies the requirements", I chose what I thought
-	// to be the simpler option to implement.
-	//
-	// There is another optimization I could also do to the current
-	// implementation, which would be to discard data from readers once it has
-	// been read. Again, it's more work and not necessarily a requirement, so I
-	// did not choose to implement this either.
-
-	buf := make([]byte, len(data))
-	copy(buf, data)
-
-	r := Reader{
-		// closeFn is called by r.Close(), the close channel is monitored so
-		// that blocking reads and goroutines can break when the reader is
-		// closed
-		close:  closeFn,
-		closed: closed,
-		buf:    bytes.NewBuffer(buf),
-	}
-
-	var channels *Channels
-
-	if jobIsDone(jobDone) {
-		dataCh := make(chan []byte)
-		channels = &Channels{
-			Data:   dataCh,
-			Closed: closed,
-		}
-		r.dataCh = dataCh
-		r.dataAvail = make(chan struct{})
-
-		// This goroutine is required to so that reads and writes to the data
-		// channel can't deadlock.
-		go r.receiver()
-	} else {
-		// The job has already completed and we know no new job output will be
-		// coming in. As a result, the state of the reader is simplified in
-		// that it only needs to be a buffer for the data it has right now. It
-		// doesn't need to be added to the map in the SafeBuffer, it doesn't
-		// need a goroutine, the calls to Read() can just defer to the internal
-		// buffer. By closing it immediately, we ensure that clients won't
-		// block indefinitely for jobs that have already completed and for
-		// which they haven't called Close() in a separate goroutine.
-		r.Close()
-	}
-
-	return &r, channels
-}
-
-func (r *Reader) isClosed() bool {
+// IsClosed returns true if the reader has been closed
+func (r *Reader) IsClosed() bool {
 	select {
 	case <-r.closed:
 		return true
@@ -118,83 +41,89 @@ func (r *Reader) isClosed() bool {
 		return false
 	}
 }
+
+// Await returns a channel that blocks until the reader has been woken with
+// Wake()
+func (r *Reader) Await() <-chan struct{} {
+	var ch chan struct{}
+	r.wakeMu.Lock()
+	ch = r.wake
+	r.wakeMu.Unlock()
+	return ch
+}
+
+// Wake is called after the Buffer has written new data
+func (r *Reader) Wake() {
+	r.wakeMu.Lock()
+	close(r.wake)
+	r.wake = make(chan struct{})
+	r.wakeMu.Unlock()
+}
+
+// Buffer is used to prevent an import cycle
+type Buffer interface {
+	ReadOffset(offset int, p []byte) (int, error)
+	Done() <-chan struct{}
+}
+
+// New returns a new Reader that will read from the beginning of Buffer until
+// io.EOF is returned after Done() closes.
+func New(b Buffer) *Reader {
+	closed := make(chan struct{})
+
+	return &Reader{
+		close:  func() { close(closed) },
+		closed: closed,
+		wake:   make(chan struct{}),
+		Buffer: b,
+	}
+}
+
+// readOffset safely reads from the buffer into p and updates the offset by the
+// number of bytes read
+func (r *Reader) readOffset(p []byte) (int, error) {
+	r.offsetMu.Lock()
+	defer r.offsetMu.Unlock()
+
+	n, err := r.ReadOffset(r.offset, p)
+	if err == nil {
+		r.offset += n
+	}
+
+	return n, err
+}
+
+// ErrReaderClosed is returned by Read() after the Reader.Close() is called
+var ErrReaderClosed = errors.New("reader is closed")
 
 // Read is the io.Reader interface and returns up to len(p) data in p. The
 // number of bytes written is returned.
 func (r *Reader) Read(p []byte) (int, error) {
-	r.mu.Lock()
-
-	n, err := r.buf.Read(p)
-	if !errors.Is(err, io.EOF) || r.isClosed() {
-		r.mu.Unlock()
-		return n, err
+	if r.IsClosed() {
+		return 0, ErrReaderClosed
 	}
 
-	// reading buf returned io.EOF and the job is still running
-
-	// have to get this while the lock is held
-	dataAvail := r.dataAvail
-
-	r.mu.Unlock()
-
-	select {
-	case <-r.closed:
-		// the reader was closed, so we return io.EOF
-		return n, io.EOF
-	case <-dataAvail:
-		// more data was written to buf, so let's return that
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		var i int
-		if i, err = r.buf.Read(p); errors.Is(err, io.EOF) {
-			err = nil
+	for {
+		n, err := r.readOffset(p)
+		if !errors.Is(err, io.EOF) || r.jobIsDone() {
+			return n, err
 		}
-		return n + i, err
+
+		// got io.EOF and job isn't done yet
+		select {
+		case <-r.Await():
+		case <-r.closed:
+			return n, ErrReaderClosed
+		case <-r.Done():
+			return n, io.EOF
+		}
 	}
 }
 
-// Close is the io.Closer interface and causes the reader to release all
-// resources. It is still possible to read any remaining buffered data until
-// io.EOF is received, but no new data can be added to the buffer after Close is
-// called.
+// Close is the io.Closer interface and causes the Buffer to remove the Reader
+// from its resources. Any Reads after being closed will return
+// ErrReaderClosed.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(r.close)
 	return nil
-}
-
-func (r *Reader) receiver() {
-	for {
-		select {
-		case <-r.closed:
-			return
-		case data, ok := <-r.dataCh:
-			if !ok {
-				r.Close()
-				return
-			}
-			if _, err := r.write(data); err != nil {
-				slog.Error("error writing to Reader buffer", "err", err)
-			}
-		}
-	}
-}
-
-// write implements the same function signature as io.Writer, but we don't
-// want to export it and confuse callers
-func (r *Reader) write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	n, err := r.buf.Write(p)
-
-	if err == nil && n > 0 {
-		close(r.dataAvail)
-		r.dataAvail = make(chan struct{})
-	}
-
-	return n, err
 }

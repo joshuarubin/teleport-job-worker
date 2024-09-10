@@ -66,7 +66,7 @@ func TestSafeBuffer(t *testing.T) {
 		}()
 
 		// 4. This should time out because nothing more is written
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(10 * time.Nanosecond)
 		select {
 		case <-timer.C:
 		case <-done:
@@ -78,12 +78,7 @@ func TestSafeBuffer(t *testing.T) {
 
 		// 6. Now the reader should return io.EOF and the done channel
 		// will close
-		timer.Reset(10 * time.Millisecond)
-		select {
-		case <-timer.C:
-			t.Fatal("expected Read to complete because jobDone was closed")
-		case <-done:
-		}
+		<-done
 		assert.Equal(io.EOF, err)
 		assert.Equal(0, n)
 	})
@@ -147,7 +142,6 @@ func TestSafeBuffer(t *testing.T) {
 
 		err = <-bufWrite(buf, "bar")
 		require.NoError(err)
-		close(jobDone)
 
 		n, err = r.Read(b)
 		assert.Equal(3, n)

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/joshuarubin/teleport-job-worker/pkg/job"
+	"github.com/joshuarubin/teleport-job-worker/pkg/safebuffer/safereader"
 )
 
 func TestMain(m *testing.M) {
@@ -101,7 +102,7 @@ func TestJobWorker(t *testing.T) {
 		require.NoError(err)
 
 		_, err = io.ReadAll(r)
-		require.NoError(err)
+		require.ErrorIs(err, safereader.ErrReaderClosed)
 
 		err = w.StopJob(userID, jobID)
 		require.NoError(err)
