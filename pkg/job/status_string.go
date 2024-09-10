@@ -13,11 +13,12 @@ func _() {
 	_ = x[StatusRunning-2]
 	_ = x[StatusCompleted-3]
 	_ = x[StatusStopped-4]
+	_ = x[StatusStartError-5]
 }
 
-const _Status_name = "UnspecifiedNotStartedRunningCompletedStopped"
+const _Status_name = "UnspecifiedNotStartedRunningCompletedStoppedStartError"
 
-var _Status_index = [...]uint8{0, 11, 21, 28, 37, 44}
+var _Status_index = [...]uint8{0, 11, 21, 28, 37, 44, 54}
 
 func (i Status) String() string {
 	if i < 0 || i >= Status(len(_Status_index)-1) {

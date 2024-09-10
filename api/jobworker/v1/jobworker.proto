@@ -35,6 +35,7 @@ enum JobStatus {
   JOB_STATUS_RUNNING = 2; // the job has been started
   JOB_STATUS_COMPLETED = 3; // the job completed successfully on its own
   JOB_STATUS_STOPPED = 4; // the job completed after being manually signaled to stop
+  JOB_STATUS_START_ERROR = 5; // the job failed to start successfully
 }
 
 message JobStatusResponse {

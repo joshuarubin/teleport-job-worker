@@ -20,4 +20,5 @@ const (
 	StatusRunning            // the job has been started
 	StatusCompleted          // the job completed successfully on its own
 	StatusStopped            // the job completed after being manually signaled to stop
+	StatusStartError         // the job failed to start successfully
 )

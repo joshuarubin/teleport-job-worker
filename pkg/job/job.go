@@ -92,6 +92,7 @@ func (j *Job) Start() error {
 	var started bool
 	j.startOnce.Do(func() {
 		if j.startErr = j.cmd.Start(); j.startErr != nil {
+			j.setStatus(StatusStartError)
 			return
 		}
 		j.setStatus(StatusRunning)
