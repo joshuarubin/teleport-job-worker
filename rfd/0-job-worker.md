@@ -66,8 +66,9 @@ Once reexecuted, the `child` command has several jobs to do. It has to remount t
 
 ##### Job Status
 
-Job status is extremely simple and only returns a status code and an optional exit_code. The status code is one of:
+Job status is extremely simple and only returns a status code an optional exit_code and an optional error. The status code is one of:
 
+- not_started: the job has not yet been started
 - running: the job has been started and has not yet completed
 - complete: the job completed successfully on its own
 - stopped: the job was manually stopped, this takes precedence over complete
